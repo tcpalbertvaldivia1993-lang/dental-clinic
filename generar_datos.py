@@ -1,4 +1,11 @@
-"""Genera datos ficticios de citas de una clínica dental en data/citas.csv."""
+"""Genera datos ficticios de una clínica dental en la carpeta data/.
+
+Archivos que crea:
+- citas.csv: una fila por cita
+- horarios.csv: días y turnos de cada odontólogo
+- presupuestos.csv: presupuestos entregados (aceptados o no)
+- gastos.csv: gastos fijos mensuales
+"""
 
 from pathlib import Path
 
@@ -6,31 +13,47 @@ import numpy as np
 import pandas as pd
 
 SEMILLA = 42
-N_PACIENTES = 800
+N_PACIENTES = 1300
 FECHA_INICIO = "2025-10-01"
 FECHA_FIN = "2026-09-30"
 
-# Precio base de cada tratamiento (en soles) y su peso de frecuencia
+# Tratamiento: (precio base en soles, peso de frecuencia, duración en minutos, % del precio en materiales)
 TRATAMIENTOS = {
-    "Consulta": (60, 0.22),
-    "Limpieza": (120, 0.25),
-    "Empaste": (180, 0.18),
-    "Extracción": (200, 0.08),
-    "Endodoncia": (650, 0.07),
-    "Ortodoncia": (350, 0.10),
-    "Blanqueamiento": (500, 0.06),
-    "Implante": (2500, 0.04),
+    "Consulta": (60, 0.22, 30, 0.05),
+    "Limpieza": (120, 0.25, 45, 0.10),
+    "Empaste": (180, 0.18, 45, 0.20),
+    "Extracción": (200, 0.08, 45, 0.10),
+    "Endodoncia": (650, 0.07, 90, 0.20),
+    "Ortodoncia": (350, 0.10, 30, 0.25),
+    "Blanqueamiento": (500, 0.06, 60, 0.30),
+    "Implante": (2500, 0.04, 120, 0.40),
 }
-ODONTOLOGOS = ["Dra. Pérez", "Dr. Gómez", "Dra. Torres", "Dr. Ramírez"]
+# Tratamientos que requieren presupuesto y su tasa de aceptación
+ACEPTACION = {"Endodoncia": 0.75, "Ortodoncia": 0.55, "Blanqueamiento": 0.50, "Implante": 0.45}
+
+DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+MANANA, TARDE = (8, 14), (14, 20)
+# Odontólogo: lista de (día, turno)
+HORARIOS = {
+    "Dra. Pérez": [(d, MANANA) for d in DIAS[:5]],
+    "Dr. Gómez": [(d, TARDE) for d in DIAS[:5]],
+    "Dra. Torres": [("Martes", MANANA), ("Jueves", MANANA), ("Sábado", MANANA)],
+    "Dr. Ramírez": [("Lunes", TARDE), ("Miércoles", TARDE), ("Viernes", TARDE), ("Sábado", MANANA)],
+}
 CANALES = ["Teléfono", "WhatsApp", "Web", "Presencial"]
 PESOS_CANALES = [0.30, 0.35, 0.20, 0.15]
 
-# Horas de atención (8 a 19 h) con picos a media mañana y al final de la tarde
-HORAS = np.arange(8, 20)
-PESOS_HORAS = np.array([4, 7, 9, 9, 6, 3, 4, 6, 8, 9, 8, 5], dtype=float)
-PESOS_HORAS /= PESOS_HORAS.sum()
+# Gastos fijos mensuales aproximados (en soles)
+GASTOS = {"Sueldos": 45000, "Alquiler": 6000, "Publicidad": 6000, "Servicios": 1500}
 
-DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+
+def tabla_horarios():
+    filas = [
+        {"odontologo": o, "dia_semana": dia, "hora_inicio": ini, "hora_fin": fin}
+        for o, turnos in HORARIOS.items()
+        for dia, (ini, fin) in turnos
+    ]
+    return pd.DataFrame(filas)
 
 
 def generar_pacientes(rng):
@@ -45,34 +68,56 @@ def generar_pacientes(rng):
     return pacientes
 
 
-def generar_citas(rng, pacientes):
-    """Genera una fila por cita, repartiendo las citas de cada paciente en el año."""
-    dias_habiles = pd.bdate_range(FECHA_INICIO, FECHA_FIN, freq="C", weekmask="Mon Tue Wed Thu Fri Sat")
+def generar_citas(rng, pacientes, horarios):
+    """Genera una fila por cita, siempre dentro del horario del odontólogo."""
     nombres = list(TRATAMIENTOS)
-    precios = np.array([TRATAMIENTOS[t][0] for t in nombres])
     pesos = np.array([TRATAMIENTOS[t][1] for t in nombres])
+
+    # Fechas en que trabaja cada odontólogo y su turno de cada día
+    todas = pd.date_range(FECHA_INICIO, FECHA_FIN)
+    turnos = {o: dict((d, t) for d, t in lista) for o, lista in HORARIOS.items()}
+    fechas_por_odontologo = {
+        o: todas[todas.day_of_week.map(lambda i: DIAS[i] in turnos[o])] for o in HORARIOS
+    }
+    # Los odontólogos con más horas reciben más pacientes
+    odontologos = list(HORARIOS)
+    horas = horarios.assign(h=horarios["hora_fin"] - horarios["hora_inicio"]).groupby("odontologo")["h"].sum()
+    pesos_odontologos = horas[odontologos].to_numpy() / horas.sum()
 
     filas = []
     for p in pacientes.itertuples():
-        fechas = np.sort(rng.choice(dias_habiles, p.n_citas))
-        odontologo = rng.choice(ODONTOLOGOS)  # cada paciente suele ir con el mismo
-        for orden, fecha in enumerate(fechas):
-            idx = rng.choice(len(nombres), p=pesos)
+        preferido = rng.choice(odontologos, p=pesos_odontologos)
+        citas_paciente = []
+        for _ in range(p.n_citas):
+            o = preferido if rng.random() < 0.85 else rng.choice(odontologos, p=pesos_odontologos)
+            fecha = rng.choice(fechas_por_odontologo[o])
+            ini, fin = turnos[o][DIAS[pd.Timestamp(fecha).day_of_week]]
+            citas_paciente.append((pd.Timestamp(fecha), int(rng.integers(ini, fin)), o))
+
+        for orden, (fecha, hora, o) in enumerate(sorted(citas_paciente)):
+            tratamiento = nombres[rng.choice(len(nombres), p=pesos)]
+            precio_base, _, duracion, pct_material = TRATAMIENTOS[tratamiento]
             estado = rng.choice(["Completada", "Cancelada", "No asistió"], p=[0.82, 0.12, 0.06])
-            precio = round(precios[idx] * rng.uniform(0.9, 1.15), 2)
+            precio = round(precio_base * rng.uniform(0.9, 1.15), 2)
+            completada = estado == "Completada"
+            # Algunos pacientes pagan solo una parte y quedan con deuda
+            pagado = precio if rng.random() > 0.15 else round(precio * rng.uniform(0.3, 0.9), 2)
             filas.append({
-                "fecha": pd.Timestamp(fecha),
-                "hora": rng.choice(HORAS, p=PESOS_HORAS),
+                "fecha": fecha,
+                "hora": hora,
                 "id_paciente": p.id_paciente,
                 "edad": p.edad,
                 "sexo": p.sexo,
                 "es_nuevo": orden == 0,
-                "odontologo": odontologo if rng.random() < 0.85 else rng.choice(ODONTOLOGOS),
-                "tratamiento": nombres[idx],
+                "odontologo": o,
+                "tratamiento": tratamiento,
+                "duracion_min": duracion,
                 "estado": estado,
                 "canal_reserva": rng.choice(CANALES, p=PESOS_CANALES),
                 "precio": precio,
-                "pagado": precio if estado == "Completada" else 0.0,
+                "pagado": pagado if completada else 0.0,
+                "saldo": round(precio - pagado, 2) if completada else 0.0,
+                "costo_material": round(precio * pct_material, 2) if completada else 0.0,
             })
 
     citas = pd.DataFrame(filas).sort_values(["fecha", "hora"]).reset_index(drop=True)
@@ -81,15 +126,65 @@ def generar_citas(rng, pacientes):
     return citas
 
 
+def generar_presupuestos(rng, citas):
+    """Un presupuesto aceptado por cada paciente y tratamiento realizado, más otros rechazados."""
+    hechas = citas[(citas["estado"] == "Completada") & citas["tratamiento"].isin(ACEPTACION)]
+    aceptados = (
+        hechas.groupby(["id_paciente", "tratamiento"])
+        .agg(fecha=("fecha", "min"), odontologo=("odontologo", "first"), monto=("precio", "sum"))
+        .reset_index()
+    )
+    # El presupuesto se entrega unos días antes de la primera cita
+    dias_antes = pd.to_timedelta(rng.integers(0, 21, len(aceptados)), unit="D")
+    aceptados["fecha"] = (aceptados["fecha"] - dias_antes).clip(lower=pd.Timestamp(FECHA_INICIO))
+    aceptados["aceptado"] = True
+
+    rechazados = []
+    pacientes = citas["id_paciente"].unique()
+    fechas = pd.date_range(FECHA_INICIO, FECHA_FIN)
+    for tratamiento, tasa in ACEPTACION.items():
+        n_aceptados = (aceptados["tratamiento"] == tratamiento).sum()
+        n_rechazados = round(n_aceptados * (1 - tasa) / tasa)
+        precio_base = TRATAMIENTOS[tratamiento][0]
+        rechazados.append(pd.DataFrame({
+            "id_paciente": rng.choice(pacientes, n_rechazados),
+            "tratamiento": tratamiento,
+            "fecha": rng.choice(fechas, n_rechazados),
+            "odontologo": rng.choice(list(HORARIOS), n_rechazados),
+            "monto": (precio_base * rng.uniform(0.9, 1.3, n_rechazados)).round(2),
+            "aceptado": False,
+        }))
+
+    presupuestos = pd.concat([aceptados, *rechazados]).sort_values("fecha").reset_index(drop=True)
+    presupuestos.insert(0, "id_presupuesto", [f"PR{i:05d}" for i in range(1, len(presupuestos) + 1)])
+    return presupuestos[["id_presupuesto", "fecha", "id_paciente", "odontologo", "tratamiento", "monto", "aceptado"]]
+
+
+def generar_gastos(rng):
+    meses = pd.date_range(FECHA_INICIO, FECHA_FIN, freq="MS")
+    filas = [
+        {"mes": mes, "concepto": concepto, "monto": round(base * rng.uniform(0.9, 1.1), 2)}
+        for mes in meses
+        for concepto, base in GASTOS.items()
+    ]
+    return pd.DataFrame(filas)
+
+
 def main():
     rng = np.random.default_rng(SEMILLA)
-    pacientes = generar_pacientes(rng)
-    citas = generar_citas(rng, pacientes)
+    horarios = tabla_horarios()
+    citas = generar_citas(rng, generar_pacientes(rng), horarios)
+    presupuestos = generar_presupuestos(rng, citas)
+    gastos = generar_gastos(rng)
 
-    ruta = Path("data/citas.csv")
-    ruta.parent.mkdir(exist_ok=True)
-    citas.to_csv(ruta, index=False)
-    print(f"Se generaron {len(citas)} citas de {citas['id_paciente'].nunique()} pacientes en {ruta}")
+    carpeta = Path("data")
+    carpeta.mkdir(exist_ok=True)
+    citas.to_csv(carpeta / "citas.csv", index=False)
+    horarios.to_csv(carpeta / "horarios.csv", index=False)
+    presupuestos.to_csv(carpeta / "presupuestos.csv", index=False)
+    gastos.to_csv(carpeta / "gastos.csv", index=False)
+    print(f"Se generaron {len(citas)} citas de {citas['id_paciente'].nunique()} pacientes, "
+          f"{len(presupuestos)} presupuestos y {len(gastos)} gastos en {carpeta}/")
 
 
 if __name__ == "__main__":
